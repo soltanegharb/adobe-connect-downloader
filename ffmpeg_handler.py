@@ -86,7 +86,6 @@ class FFmpegHandler:
         hwaccel_args = []
         
         if functional_encoders:
-            # --- HAPPY PATH: Validation succeeded ---
             best_encoder = functional_encoders[0]
             encoder_args = best_encoder.command_builder.build_command(quality)
             encoder_name = best_encoder.device_name
@@ -96,18 +95,13 @@ class FFmpegHandler:
             if use_gpu and best_encoder.name == 'h264_vaapi':
                 hwaccel_args = ['-hwaccel', 'vaapi', '-vaapi_device', best_encoder.device_id, '-hwaccel_output_format', 'vaapi']
         else:
-            # --- FALLBACK PATH: Validation failed completely ---
             logging.warning("All encoders failed validation, likely due to a corrupted source file.")
             logging.warning("Attempting a robust, non-validated CPU-only normalization as a last resort.")
             encoder_name = f"libx264 (CPU - Fallback Mode)"
             encoder_args = ['-c:v', 'libx264', '-preset', quality.value, '-crf', config.QualityMapper.get_crf(quality)]
 
         command = [self.ffmpeg_path, '-y', '-hide_banner']
-        
-        # --- FIX: Explicitly specify the VP6F decoder for all inputs ---
-        # This handles the old Flash Video codec before it hits the encoders.
         command.extend(['-c:v', 'vp6f'])
-
         command.extend(hwaccel_args)
 
         for file_path in video_files:
@@ -173,21 +167,17 @@ class FFmpegHandler:
         logging.info(f"Selected best validated encoder for final merge: '{best_encoder.device_name}'")
 
         command = [self.ffmpeg_path, '-y', '-hide_banner']
-
-        # Add hardware acceleration flags for decoding the input file
-        if best_encoder.name == 'h264_vaapi':
-            command.extend(['-hwaccel', 'vaapi', '-vaapi_device', best_encoder.device_id])
-        elif best_encoder.name == 'h264_nvenc':
-            command.extend(['-hwaccel', 'cuda']) # or 'nvdec' depending on ffmpeg version
-        elif best_encoder.name == 'h264_qsv':
-            command.extend(['-hwaccel', 'qsv'])
-
         command.extend(['-i', media.video_path, '-i', media.audio_path])
 
         encoder_args = best_encoder.command_builder.build_command(quality)
         command.extend(encoder_args)
-
-        command.extend(['-c:a', 'copy', '-async', '1'])
+        
+        # --- FINAL A/V SYNC FIX ---
+        # Instead of just copying the audio stream (-c:a copy), we re-encode it.
+        # This forces FFmpeg to create a brand new audio stream that is perfectly
+        # synchronized to the video's timestamps, fixing any lingering drift.
+        command.extend(['-c:a', 'aac', '-b:a', '192k'])
+        
         command.extend(['-movflags', '+faststart'])
         command.append(output_file)
 
